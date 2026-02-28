@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lenny's World</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <!-- Start Screen -->
+  <div id="start-screen">
+    <div class="start-content">
+      <h1>Lenny's World</h1>
+      <p class="subtitle">Walk, explore, and talk to 303 podcast guests</p>
+      <div class="avatar-preview">
+        <canvas id="avatar-preview-canvas" width="120" height="120"></canvas>
+      </div>
+      <div class="color-picker">
+        <label>Your shirt color:</label>
+        <div class="color-options" id="shirt-colors">
+          <button class="color-btn selected" data-color="#4A90D9" style="background:#4A90D9"></button>
+          <button class="color-btn" data-color="#E85D3A" style="background:#E85D3A"></button>
+          <button class="color-btn" data-color="#50C878" style="background:#50C878"></button>
+          <button class="color-btn" data-color="#E8A838" style="background:#E8A838"></button>
+          <button class="color-btn" data-color="#9B59B6" style="background:#9B59B6"></button>
+          <button class="color-btn" data-color="#FF6B9D" style="background:#FF6B9D"></button>
+        </div>
+      </div>
+      <input type="text" id="player-name" placeholder="Enter your name" maxlength="20" />
+      <button id="start-btn">Enter Lenny's World</button>
+      <p class="controls-hint">Arrow keys to move &middot; E to talk &middot; ESC to close</p>
+    </div>
+  </div>
+
+  <!-- Game UI Overlays -->
+  <div id="game-ui" style="display:none">
+    <!-- Room label -->
+    <div id="room-label"></div>
+
+    <!-- NPC proximity hint -->
+    <div id="interact-hint" style="display:none">
+      Press <kbd>E</kbd> to talk to <span id="hint-name"></span>
+    </div>
+
+    <!-- Minimap -->
+    <canvas id="minimap" width="200" height="200"></canvas>
+
+    <!-- Guest count -->
+    <div id="guest-counter"></div>
+  </div>
+
+  <!-- Dialogue overlay -->
+  <div id="dialogue-overlay" style="display:none">
+    <div id="dialogue-box">
+      <div id="dialogue-header">
+        <span id="dialogue-name"></span>
+        <span id="dialogue-title"></span>
+        <button id="dialogue-close">&times;</button>
+      </div>
+      <div id="dialogue-messages"></div>
+      <div id="dialogue-input-row">
+        <input type="text" id="dialogue-input" placeholder="Ask something..." />
+        <button id="dialogue-send">Send</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Loading screen -->
+  <div id="loading-screen" style="display:none">
+    <div class="loading-content">
+      <h2>Loading Lenny's World...</h2>
+      <div class="loading-bar"><div class="loading-fill" id="loading-fill"></div></div>
+      <p id="loading-status">Fetching character data...</p>
+    </div>
+  </div>
+
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+    }
+  }
+  </script>
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>
