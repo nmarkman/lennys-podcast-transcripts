@@ -9,6 +9,7 @@ import { Minimap } from './minimap.js';
 let renderer, scene, camera, clock;
 let player, characterManager, dialogue, minimap;
 let worldData, characterData;
+let directoryOverlay;
 let gameStarted = false;
 
 // ── Start Screen ──────────────────────────────────────────────────────────────
@@ -139,7 +140,7 @@ async function initGame(playerName, shirtColor) {
   setLoadingProgress(80, 'Setting up player...');
 
   // Create player
-  player = new Player(scene, camera, shirtColor);
+  player = new Player(scene, camera, shirtColor, worldResult.wallBoxes);
 
   // Dialogue system
   dialogue = new DialogueSystem();
@@ -155,12 +156,24 @@ async function initGame(playerName, shirtColor) {
   window.addEventListener('keydown', (e) => {
     if (e.key === 'e' || e.key === 'E') {
       if (dialogue.isOpen) return;
+      if (directoryOverlay && directoryOverlay.style.display !== 'none') return;
       const nearest = characterManager.getNearestInteractable(player.position);
       if (nearest) {
-        dialogue.open(nearest);
+        if (nearest.isKiosk) {
+          openDirectory(nearest.kiosk);
+        } else {
+          dialogue.open(nearest);
+        }
       }
     }
+    if (e.key === 'Escape' && directoryOverlay) {
+      directoryOverlay.style.display = 'none';
+      player.dialogueOpen = false;
+    }
   });
+
+  // Build directory overlay
+  directoryOverlay = buildDirectoryOverlay();
 
   // Window resize
   window.addEventListener('resize', () => {
@@ -182,6 +195,72 @@ async function initGame(playerName, shirtColor) {
     gameStarted = true;
     animate();
   }, 500);
+}
+
+
+// ── Directory Overlay ─────────────────────────────────────────────────────────
+function buildDirectoryOverlay() {
+  const overlay = document.createElement('div');
+  overlay.id = 'directory-overlay';
+  overlay.style.cssText = `
+    display: none; position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+    width: 420px; max-height: 70vh; background: rgba(10, 10, 30, 0.95);
+    border: 2px solid rgba(100, 100, 200, 0.4); border-radius: 12px;
+    padding: 20px; overflow-y: auto; z-index: 1000;
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    backdrop-filter: blur(10px);
+  `;
+  document.body.appendChild(overlay);
+  return overlay;
+}
+
+function openDirectory(kiosk) {
+  player.dialogueOpen = true;
+  const overlay = directoryOverlay;
+  overlay.style.display = 'block';
+
+  let html = '<div style="color: #fff; margin-bottom: 16px;">';
+  html += '<h2 style="font-size: 18px; margin: 0 0 4px 0; color: ' + (kiosk.visibleChars[0]?.colors?.shirt || '#4A90D9') + ';">' + kiosk.roomId + ' Directory</h2>';
+  html += '<p style="font-size: 12px; color: #8888aa; margin: 0;">Click a guest to summon them. Press ESC to close.</p>';
+  html += '</div>';
+
+  html += '<div style="display: flex; flex-direction: column; gap: 6px;">';
+  for (let i = 0; i < kiosk.hiddenChars.length; i++) {
+    const c = kiosk.hiddenChars[i];
+    const shirtColor = c.colors?.shirt || '#4A90D9';
+    html += '<button data-idx="' + i + '" style="';
+    html += 'display: flex; align-items: center; gap: 10px; padding: 8px 12px;';
+    html += 'background: rgba(40, 40, 70, 0.8); border: 1px solid rgba(100,100,200,0.2);';
+    html += 'border-radius: 8px; cursor: pointer; text-align: left; color: #fff;';
+    html += 'font-family: inherit; font-size: 13px; transition: border-color 0.2s;';
+    html += '">';
+    html += '<span style="width: 8px; height: 8px; border-radius: 50%; background: ' + shirtColor + '; flex-shrink: 0;"></span>';
+    html += '<span>' + c.name + '</span>';
+    if (c.title) html += '<span style="color: #666; font-size: 11px; margin-left: auto;">' + c.title + '</span>';
+    html += '</button>';
+  }
+  html += '</div>';
+
+  overlay.innerHTML = html;
+
+  // Click handlers
+  overlay.querySelectorAll('button[data-idx]').forEach(btn => {
+    btn.addEventListener('mouseenter', () => { btn.style.borderColor = 'rgba(100,100,200,0.6)'; });
+    btn.addEventListener('mouseleave', () => { btn.style.borderColor = 'rgba(100,100,200,0.2)'; });
+    btn.addEventListener('click', () => {
+      const idx = parseInt(btn.dataset.idx);
+      const charData = kiosk.hiddenChars[idx];
+      const name = characterManager.spawnFromDirectory(charData, kiosk.position);
+      // Remove from hidden list
+      kiosk.hiddenChars.splice(idx, 1);
+      // Close directory
+      overlay.style.display = 'none';
+      player.dialogueOpen = false;
+      // Update hint
+      document.getElementById('guest-counter').textContent =
+        characterManager.characters.length + ' guests visible';
+    });
+  });
 }
 
 // ── Game Loop ─────────────────────────────────────────────────────────────────

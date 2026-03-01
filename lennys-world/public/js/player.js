@@ -7,7 +7,7 @@ const CAMERA_DISTANCE = 12;
 const CAMERA_LOOK_AHEAD = 4;
 
 export class Player {
-  constructor(scene, camera, shirtColor) {
+  constructor(scene, camera, shirtColor, wallBoxes = []) {
     this.scene = scene;
     this.camera = camera;
     this.group = new THREE.Group();
@@ -15,6 +15,8 @@ export class Player {
     this.rotation = 0; // Y-axis rotation
     this.keys = {};
     this.dialogueOpen = false;
+    this.wallBoxes = wallBoxes;
+    this.playerRadius = 0.5;
 
     // Build player mesh
     this.buildModel(shirtColor);
@@ -130,7 +132,36 @@ export class Player {
       moveDir.normalize().multiplyScalar(MOVE_SPEED * delta);
     }
 
-    this.group.position.add(moveDir);
+    // Collision detection — try X and Z independently for wall sliding
+    const newPos = this.group.position.clone().add(moveDir);
+    const r = this.playerRadius;
+
+    // Test X movement
+    const testX = this.group.position.clone();
+    testX.x = newPos.x;
+    const boxX = new THREE.Box3(
+      new THREE.Vector3(testX.x - r, 0, testX.z - r),
+      new THREE.Vector3(testX.x + r, 3, testX.z + r)
+    );
+    let blockedX = false;
+    for (const wall of this.wallBoxes) {
+      if (boxX.intersectsBox(wall)) { blockedX = true; break; }
+    }
+
+    // Test Z movement
+    const testZ = this.group.position.clone();
+    testZ.z = newPos.z;
+    const boxZ = new THREE.Box3(
+      new THREE.Vector3(testZ.x - r, 0, testZ.z - r),
+      new THREE.Vector3(testZ.x + r, 3, testZ.z + r)
+    );
+    let blockedZ = false;
+    for (const wall of this.wallBoxes) {
+      if (boxZ.intersectsBox(wall)) { blockedZ = true; break; }
+    }
+
+    if (!blockedX) this.group.position.x = newPos.x;
+    if (!blockedZ) this.group.position.z = newPos.z;
     this.group.rotation.y = this.rotation;
 
     // Walk animation

@@ -25,14 +25,15 @@ const ROOM_LAYOUT = [
 
 export function buildWorld(scene, roomsData) {
   const roomMeta = {};
+  const wallBoxes = []; // Collision bounding boxes
 
   // ── Floor material ──────────────────────────────────────────────────────────
   const lobbyFloorMat = new THREE.MeshStandardMaterial({
-    color: 0x1a1a2e,
+    color: 0x252540,
     roughness: 0.8,
   });
   const wallMat = new THREE.MeshStandardMaterial({
-    color: 0x2a2a4a,
+    color: 0x3a3a5a,
     roughness: 0.6,
   });
 
@@ -75,7 +76,7 @@ export function buildWorld(scene, roomsData) {
     // Build room
     const roomColor = new THREE.Color(roomData.color);
     const roomFloorMat = new THREE.MeshStandardMaterial({
-      color: roomColor.clone().multiplyScalar(0.15),
+      color: roomColor.clone().multiplyScalar(0.25),
       roughness: 0.7,
     });
 
@@ -92,7 +93,7 @@ export function buildWorld(scene, roomsData) {
     buildRoomWalls(scene, cx, cz, roomSize, layout.angle, wallMat, roomColor);
 
     // Room accent light
-    const pointLight = new THREE.PointLight(roomColor, 0.5, roomSize * 2);
+    const pointLight = new THREE.PointLight(roomColor, 1.2, roomSize * 3);
     pointLight.position.set(cx, WALL_HEIGHT - 1, cz);
     scene.add(pointLight);
 
@@ -135,10 +136,10 @@ export function buildWorld(scene, roomsData) {
   };
 
   // ── Lighting ────────────────────────────────────────────────────────────────
-  const ambientLight = new THREE.AmbientLight(0x404060, 0.6);
+  const ambientLight = new THREE.AmbientLight(0x606080, 1.0);
   scene.add(ambientLight);
 
-  const dirLight = new THREE.DirectionalLight(0xffffff, 0.4);
+  const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
   dirLight.position.set(30, 50, 20);
   dirLight.castShadow = true;
   dirLight.shadow.camera.left = -80;
@@ -148,15 +149,27 @@ export function buildWorld(scene, roomsData) {
   scene.add(dirLight);
 
   // Lobby center light
-  const lobbyLight = new THREE.PointLight(0x4A90D9, 0.6, 50);
+  const lobbyLight = new THREE.PointLight(0x4A90D9, 1.0, 60);
   lobbyLight.position.set(0, WALL_HEIGHT, 0);
   scene.add(lobbyLight);
 
   // Sky/fog
-  scene.fog = new THREE.FogExp2(0x0a0a1a, 0.008);
+  scene.fog = new THREE.FogExp2(0x0a0a1a, 0.005);
   scene.background = new THREE.Color(0x0a0a1a);
 
-  return { roomMeta, LOBBY_RADIUS, CORRIDOR_LENGTH, WALL_HEIGHT };
+  // Update wall matrices and compute bounding boxes
+  scene.updateMatrixWorld(true);
+  // Recompute all wall bounding boxes after matrix update
+  wallBoxes.length = 0;
+  scene.traverse((obj) => {
+    if (obj.isMesh && obj.userData.isWall) {
+      obj.geometry.computeBoundingBox();
+      const bb = new THREE.Box3().setFromObject(obj);
+      wallBoxes.push(bb);
+    }
+  });
+
+  return { roomMeta, wallBoxes, LOBBY_RADIUS, CORRIDOR_LENGTH, WALL_HEIGHT };
 }
 
 function buildLobbyWalls(scene, wallMat) {
@@ -192,6 +205,7 @@ function buildLobbyWalls(scene, wallMat) {
     wall.position.set((x1 + x2) / 2, WALL_HEIGHT / 2, (z1 + z2) / 2);
     wall.rotation.y = -Math.atan2(z2 - z1, x2 - x1);
     wall.castShadow = true;
+    wall.userData.isWall = true;
     scene.add(wall);
   }
 }
@@ -227,17 +241,19 @@ function buildCorridor(scene, angle, wallMat, roomData) {
       wallMat
     );
 
-    const perpAngle = angle + Math.PI / 2;
-    const offsetX = Math.cos(perpAngle) * (CORRIDOR_WIDTH / 2) * side;
-    const offsetZ = -Math.sin(perpAngle) * (CORRIDOR_WIDTH / 2) * side;
+    // Perpendicular offset for each side
+    const perpX = Math.cos(angle + Math.PI / 2) * (CORRIDOR_WIDTH / 2) * side;
+    const perpZ = -Math.sin(angle + Math.PI / 2) * (CORRIDOR_WIDTH / 2) * side;
 
     wall.position.set(
-      Math.cos(angle) * midDist + offsetX,
+      Math.cos(angle) * midDist + perpX,
       WALL_HEIGHT / 2,
-      -Math.sin(angle) * midDist + offsetZ
+      -Math.sin(angle) * midDist + perpZ
     );
-    wall.rotation.y = -(angle - Math.PI / 2);
+    // Wall should be parallel to the corridor direction
+    wall.rotation.y = -angle + Math.PI / 2;
     wall.castShadow = true;
+    wall.userData.isWall = true;
     scene.add(wall);
   }
 
@@ -281,7 +297,7 @@ function buildRoomWalls(scene, cx, cz, size, angle, wallMat, roomColor) {
   const perpX = -dirZ;
   const perpZ = dirX;
 
-  // Back wall
+  // Back wall (perpendicular to corridor direction)
   const backWall = new THREE.Mesh(
     new THREE.BoxGeometry(size, WALL_HEIGHT, WALL_THICKNESS),
     wallMat
@@ -291,8 +307,9 @@ function buildRoomWalls(scene, cx, cz, size, angle, wallMat, roomColor) {
     WALL_HEIGHT / 2,
     cz + dirZ * halfSize
   );
-  backWall.rotation.y = -(angle - Math.PI / 2);
+  backWall.rotation.y = -angle + Math.PI / 2;
   backWall.castShadow = true;
+  backWall.userData.isWall = true;
   scene.add(backWall);
 
   // Accent strip on back wall
@@ -305,10 +322,10 @@ function buildRoomWalls(scene, cx, cz, size, angle, wallMat, roomColor) {
     WALL_HEIGHT - 0.5,
     cz + dirZ * halfSize
   );
-  backAccent.rotation.y = -(angle - Math.PI / 2);
+  backAccent.rotation.y = -angle + Math.PI / 2;
   scene.add(backAccent);
 
-  // Side walls
+  // Side walls (parallel to corridor direction)
   for (const side of [-1, 1]) {
     const wall = new THREE.Mesh(
       new THREE.BoxGeometry(size, WALL_HEIGHT, WALL_THICKNESS),
@@ -321,6 +338,7 @@ function buildRoomWalls(scene, cx, cz, size, angle, wallMat, roomColor) {
     );
     wall.rotation.y = -angle;
     wall.castShadow = true;
+    wall.userData.isWall = true;
     scene.add(wall);
   }
 }
@@ -337,13 +355,15 @@ function angleDiff(a, b) {
 export function makeTextSprite(text, color, scale = 1) {
   const canvas = document.createElement('canvas');
   const ctx = canvas.getContext('2d');
-  const fontSize = 48;
+  const ratio = 2; // high-DPI
+  const fontSize = 48 * ratio;
+  const padding = 40 * ratio;
   ctx.font = `bold ${fontSize}px -apple-system, BlinkMacSystemFont, sans-serif`;
   const metrics = ctx.measureText(text);
-  const width = metrics.width + 20;
-  canvas.width = width;
-  canvas.height = fontSize + 20;
+  canvas.width = metrics.width + padding * 2;
+  canvas.height = fontSize + padding;
 
+  // Must re-set font after canvas resize
   ctx.font = `bold ${fontSize}px -apple-system, BlinkMacSystemFont, sans-serif`;
   ctx.fillStyle = color;
   ctx.textAlign = 'center';
