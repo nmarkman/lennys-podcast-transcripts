@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { buildWorld, getCurrentRoom } from './world.js';
+import { buildWorld } from './world.js';
 import { CharacterManager } from './characters.js';
 import { Player } from './player.js';
 import { DialogueSystem } from './dialogue.js';
@@ -8,9 +8,9 @@ import { Minimap } from './minimap.js';
 // ── State ─────────────────────────────────────────────────────────────────────
 let renderer, scene, camera, clock;
 let player, characterManager, dialogue, minimap;
-let worldData, characterData;
-let directoryOverlay;
+let worldData;
 let gameStarted = false;
+let spawnedGuestIds = new Set();
 
 // ── Start Screen ──────────────────────────────────────────────────────────────
 const startScreen = document.getElementById('start-screen');
@@ -40,37 +40,31 @@ function drawAvatarPreview() {
 
   ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-  // Body
   ctx.fillStyle = selectedShirtColor;
   ctx.beginPath();
   ctx.roundRect(cx - 18, cy - 5, 36, 40, 5);
   ctx.fill();
 
-  // Head
   ctx.fillStyle = '#FDDBB4';
   ctx.beginPath();
   ctx.arc(cx, cy - 18, 16, 0, Math.PI * 2);
   ctx.fill();
 
-  // Hair
   ctx.fillStyle = '#2C1810';
   ctx.beginPath();
   ctx.arc(cx, cy - 22, 17, Math.PI, Math.PI * 2);
   ctx.fill();
 
-  // Legs
   ctx.fillStyle = '#2a2a4a';
   ctx.fillRect(cx - 12, cy + 35, 10, 20);
   ctx.fillRect(cx + 2, cy + 35, 10, 20);
 
-  // Eyes
   ctx.fillStyle = '#333';
   ctx.beginPath();
   ctx.arc(cx - 6, cy - 18, 2, 0, Math.PI * 2);
   ctx.arc(cx + 6, cy - 18, 2, 0, Math.PI * 2);
   ctx.fill();
 
-  // Smile
   ctx.strokeStyle = '#333';
   ctx.lineWidth = 1.5;
   ctx.beginPath();
@@ -88,7 +82,6 @@ startBtn.addEventListener('click', () => {
   initGame(name, selectedShirtColor);
 });
 
-// Enter key on name input
 playerNameInput.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') startBtn.click();
 });
@@ -100,18 +93,7 @@ function setLoadingProgress(pct, status) {
 }
 
 async function initGame(playerName, shirtColor) {
-  setLoadingProgress(10, 'Fetching character data...');
-
-  // Fetch character data
-  try {
-    const res = await fetch('/api/characters');
-    characterData = await res.json();
-  } catch (err) {
-    setLoadingProgress(0, `Error: ${err.message}`);
-    return;
-  }
-
-  setLoadingProgress(30, `Loaded ${characterData.totalCharacters} characters`);
+  setLoadingProgress(10, 'Setting up studio...');
 
   // Init Three.js
   renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -125,55 +107,104 @@ async function initGame(playerName, shirtColor) {
   camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 500);
   clock = new THREE.Clock();
 
-  setLoadingProgress(50, 'Building world...');
+  setLoadingProgress(30, 'Building podcast lounge...');
 
-  // Build world
-  const worldResult = buildWorld(scene, characterData.rooms);
-  worldData = worldResult;
+  // Build lounge world (no character data needed)
+  worldData = buildWorld(scene);
 
-  setLoadingProgress(65, 'Placing characters...');
+  setLoadingProgress(50, 'Loading photo data...');
 
-  // Create characters
-  characterManager = new CharacterManager(scene);
-  characterManager.createAllCharacters(characterData.characters, worldResult.roomMeta);
+  // Fetch photo map (lightweight, optional)
+  let photoMap = {};
+  try {
+    const photoRes = await fetch('/data/photo-map.json');
+    if (photoRes.ok) photoMap = await photoRes.json();
+  } catch {
+    // Photo map is optional
+  }
 
-  setLoadingProgress(80, 'Setting up player...');
+  setLoadingProgress(60, 'Fetching host data...');
 
-  // Create player
-  player = new Player(scene, camera, shirtColor, worldResult.wallBoxes);
+  // Fetch Lenny's character data
+  let lennyData;
+  try {
+    const lennyRes = await fetch('/api/characters/lenny');
+    lennyData = await lennyRes.json();
+  } catch (err) {
+    setLoadingProgress(0, `Error loading Lenny: ${err.message}`);
+    return;
+  }
+
+  setLoadingProgress(75, 'Preparing the studio...');
+
+  // Create character manager with spawn points
+  characterManager = new CharacterManager(scene, worldData.SPAWN_POINTS);
+  characterManager.setPhotoMap(photoMap);
+
+  // Spawn only Lenny at podcast desk
+  characterManager.spawnLenny(worldData.lennyPosition, lennyData);
+
+  setLoadingProgress(85, 'Setting up player...');
+
+  // Create player at lounge entrance
+  player = new Player(scene, camera, shirtColor, worldData.wallBoxes);
+  // Override default position to lounge entrance
+  player.group.position.set(0, 0, 12);
 
   // Dialogue system
   dialogue = new DialogueSystem();
-  dialogue.onOpen = () => { player.dialogueOpen = true; };
-  dialogue.onClose = () => { player.dialogueOpen = false; };
+  dialogue.photoMap = photoMap;
+  dialogue.onOpen = () => {
+    player.dialogueOpen = true;
+    if (dialogue.currentGuest) {
+      characterManager.setTalkingToPlayer(dialogue.currentGuest.id);
+    }
+  };
+  dialogue.onClose = () => {
+    if (dialogue.currentGuest) {
+      characterManager.releaseTalkingToPlayer(dialogue.currentGuest.id);
+    }
+    player.dialogueOpen = false;
+  };
+
+  // Wire recommendation → spawn pipeline
+  dialogue.onGuestsRecommended = async (recommendations) => {
+    const ids = recommendations.map(r => r.id);
+    try {
+      const res = await fetch('/api/characters/batch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids })
+      });
+      if (res.ok) {
+        const chars = await res.json();
+        characterManager.spawnGuests(chars);
+        // Track spawned IDs so Lenny doesn't re-recommend
+        for (const id of ids) spawnedGuestIds.add(id);
+        dialogue.spawnedGuestIds = [...spawnedGuestIds];
+        // Update guest counter
+        updateGuestCounter();
+      }
+    } catch (err) {
+      console.error('Failed to load recommended guests:', err);
+    }
+  };
 
   // Minimap
-  minimap = new Minimap(worldResult.roomMeta);
+  minimap = new Minimap(worldData.LOUNGE_WIDTH, worldData.LOUNGE_DEPTH);
 
   setLoadingProgress(95, 'Almost ready...');
 
-  // Listen for interact key
+  // Interact key handler
   window.addEventListener('keydown', (e) => {
     if (e.key === 'e' || e.key === 'E') {
       if (dialogue.isOpen) return;
-      if (directoryOverlay && directoryOverlay.style.display !== 'none') return;
       const nearest = characterManager.getNearestInteractable(player.position);
       if (nearest) {
-        if (nearest.isKiosk) {
-          openDirectory(nearest.kiosk);
-        } else {
-          dialogue.open(nearest);
-        }
+        dialogue.open(nearest);
       }
     }
-    if (e.key === 'Escape' && directoryOverlay) {
-      directoryOverlay.style.display = 'none';
-      player.dialogueOpen = false;
-    }
   });
-
-  // Build directory overlay
-  directoryOverlay = buildDirectoryOverlay();
 
   // Window resize
   window.addEventListener('resize', () => {
@@ -183,8 +214,7 @@ async function initGame(playerName, shirtColor) {
   });
 
   // Guest counter
-  document.getElementById('guest-counter').textContent =
-    `${characterData.totalCharacters} guests in the world`;
+  updateGuestCounter();
 
   setLoadingProgress(100, 'Welcome!');
 
@@ -197,70 +227,10 @@ async function initGame(playerName, shirtColor) {
   }, 500);
 }
 
-
-// ── Directory Overlay ─────────────────────────────────────────────────────────
-function buildDirectoryOverlay() {
-  const overlay = document.createElement('div');
-  overlay.id = 'directory-overlay';
-  overlay.style.cssText = `
-    display: none; position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
-    width: 420px; max-height: 70vh; background: rgba(10, 10, 30, 0.95);
-    border: 2px solid rgba(100, 100, 200, 0.4); border-radius: 12px;
-    padding: 20px; overflow-y: auto; z-index: 1000;
-    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
-    backdrop-filter: blur(10px);
-  `;
-  document.body.appendChild(overlay);
-  return overlay;
-}
-
-function openDirectory(kiosk) {
-  player.dialogueOpen = true;
-  const overlay = directoryOverlay;
-  overlay.style.display = 'block';
-
-  let html = '<div style="color: #fff; margin-bottom: 16px;">';
-  html += '<h2 style="font-size: 18px; margin: 0 0 4px 0; color: ' + (kiosk.visibleChars[0]?.colors?.shirt || '#4A90D9') + ';">' + kiosk.roomId + ' Directory</h2>';
-  html += '<p style="font-size: 12px; color: #8888aa; margin: 0;">Click a guest to summon them. Press ESC to close.</p>';
-  html += '</div>';
-
-  html += '<div style="display: flex; flex-direction: column; gap: 6px;">';
-  for (let i = 0; i < kiosk.hiddenChars.length; i++) {
-    const c = kiosk.hiddenChars[i];
-    const shirtColor = c.colors?.shirt || '#4A90D9';
-    html += '<button data-idx="' + i + '" style="';
-    html += 'display: flex; align-items: center; gap: 10px; padding: 8px 12px;';
-    html += 'background: rgba(40, 40, 70, 0.8); border: 1px solid rgba(100,100,200,0.2);';
-    html += 'border-radius: 8px; cursor: pointer; text-align: left; color: #fff;';
-    html += 'font-family: inherit; font-size: 13px; transition: border-color 0.2s;';
-    html += '">';
-    html += '<span style="width: 8px; height: 8px; border-radius: 50%; background: ' + shirtColor + '; flex-shrink: 0;"></span>';
-    html += '<span>' + c.name + '</span>';
-    if (c.title) html += '<span style="color: #666; font-size: 11px; margin-left: auto;">' + c.title + '</span>';
-    html += '</button>';
-  }
-  html += '</div>';
-
-  overlay.innerHTML = html;
-
-  // Click handlers
-  overlay.querySelectorAll('button[data-idx]').forEach(btn => {
-    btn.addEventListener('mouseenter', () => { btn.style.borderColor = 'rgba(100,100,200,0.6)'; });
-    btn.addEventListener('mouseleave', () => { btn.style.borderColor = 'rgba(100,100,200,0.2)'; });
-    btn.addEventListener('click', () => {
-      const idx = parseInt(btn.dataset.idx);
-      const charData = kiosk.hiddenChars[idx];
-      const name = characterManager.spawnFromDirectory(charData, kiosk.position);
-      // Remove from hidden list
-      kiosk.hiddenChars.splice(idx, 1);
-      // Close directory
-      overlay.style.display = 'none';
-      player.dialogueOpen = false;
-      // Update hint
-      document.getElementById('guest-counter').textContent =
-        characterManager.characters.length + ' guests visible';
-    });
-  });
+function updateGuestCounter() {
+  const count = characterManager ? characterManager.characters.filter(c => !c.data.isHost).length : 0;
+  document.getElementById('guest-counter').textContent =
+    count === 0 ? 'Talk to Lenny to meet guests' : `${count} guest${count !== 1 ? 's' : ''} in the lounge`;
 }
 
 // ── Game Loop ─────────────────────────────────────────────────────────────────
@@ -274,16 +244,8 @@ function animate() {
   // Update player
   player.update(delta, time);
 
-  // Update characters (proximity checks, idle animation)
-  characterManager.update(player.position, time);
-
-  // Update room label
-  const currentRoom = getCurrentRoom(player.position, worldData.roomMeta);
-  const roomLabel = document.getElementById('room-label');
-  if (currentRoom) {
-    roomLabel.textContent = currentRoom.name;
-    roomLabel.style.borderColor = currentRoom.color || 'rgba(255,255,255,0.1)';
-  }
+  // Update characters (proximity checks, idle animation, billboard facing)
+  characterManager.update(player.position, time, camera, delta);
 
   // Update interact hint
   const hintEl = document.getElementById('interact-hint');
@@ -301,6 +263,7 @@ function animate() {
   }
 
   // Update minimap
+  minimap.setGuestPositions(characterManager.getGuestPositions());
   minimap.update(player.position);
 
   // Render

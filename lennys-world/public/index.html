@@ -11,7 +11,7 @@
   <div id="start-screen">
     <div class="start-content">
       <h1>Lenny's World</h1>
-      <p class="subtitle">Walk, explore, and talk to 303 podcast guests</p>
+      <p class="subtitle">Chat with Lenny, meet his favorite guests</p>
       <div class="avatar-preview">
         <canvas id="avatar-preview-canvas" width="120" height="120"></canvas>
       </div>
@@ -34,9 +34,6 @@
 
   <!-- Game UI Overlays -->
   <div id="game-ui" style="display:none">
-    <!-- Room label -->
-    <div id="room-label"></div>
-
     <!-- NPC proximity hint -->
     <div id="interact-hint" style="display:none">
       Press <kbd>E</kbd> to talk to <span id="hint-name"></span>
@@ -53,11 +50,15 @@
   <div id="dialogue-overlay" style="display:none">
     <div id="dialogue-box">
       <div id="dialogue-header">
-        <span id="dialogue-name"></span>
-        <span id="dialogue-title"></span>
+        <div id="dialogue-avatar"></div>
+        <div id="dialogue-header-text">
+          <span id="dialogue-name"></span>
+          <span id="dialogue-title"></span>
+        </div>
         <button id="dialogue-close">&times;</button>
       </div>
       <div id="dialogue-messages"></div>
+      <div id="topic-suggestions" style="display:none"></div>
       <div id="dialogue-input-row">
         <input type="text" id="dialogue-input" placeholder="Ask something..." />
         <button id="dialogue-send">Send</button>

@@ -5,6 +5,7 @@
   "main": "server.js",
   "scripts": {
     "build-data": "node scripts/build-character-data.js",
+    "build-photos": "node scripts/build-photo-map.js",
     "start": "node server.js",
     "dev": "node server.js"
   },

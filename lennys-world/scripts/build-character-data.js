@@ -13,6 +13,7 @@ const path = require('path');
 const EPISODES_DIR = path.resolve(__dirname, '../../episodes');
 const INDEX_DIR = path.resolve(__dirname, '../../index');
 const OUTPUT_FILE = path.resolve(__dirname, '../data/characters.json');
+const CATALOG_FILE = path.resolve(__dirname, '../data/guest-catalog.json');
 
 // ── Room definitions ──────────────────────────────────────────────────────────
 // Each room maps to a set of keyword topics from the index.
@@ -214,7 +215,10 @@ function extractLightningRound(content) {
 
 // ── Extract key quotes ────────────────────────────────────────────────────────
 function extractKeyQuotes(content, guestName) {
-  const lines = content.split('\n');
+  // Skip frontmatter
+  const bodyStart = content.indexOf('---', 4);
+  const body = bodyStart > -1 ? content.substring(bodyStart + 3) : content;
+  const lines = body.split('\n');
   const quotes = [];
   const firstName = guestName.split(' ')[0];
 
@@ -420,6 +424,18 @@ function main() {
   };
 
   fs.writeFileSync(OUTPUT_FILE, JSON.stringify(output, null, 2));
+
+  // Generate guest catalog (compact index for Lenny's recommendation engine)
+  const catalog = characters
+    .filter(c => !c.isHost)
+    .map(c => ({
+      id: c.id,
+      name: c.name,
+      title: c.title,
+      keywords: c.keywords
+    }));
+  fs.writeFileSync(CATALOG_FILE, JSON.stringify(catalog, null, 2));
+  console.log(`Guest catalog: ${CATALOG_FILE} (${catalog.length} guests, ${(JSON.stringify(catalog).length / 1024).toFixed(1)}KB)`);
 
   console.log('Room distribution:');
   for (const [room, count] of Object.entries(roomCounts).sort((a, b) => b[1] - a[1])) {

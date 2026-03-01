@@ -3,115 +3,121 @@ import { makeTextSprite } from './world.js';
 
 const NAME_VISIBLE_DISTANCE = 12;
 const INTERACTION_DISTANCE = 4;
-const MAX_VISIBLE_PER_ROOM = 8;
+const MAX_SPAWNED = 12;
+
+// Behavior constants
+const NPC_WALK_SPEED = 1.5;
+const WANDER_RADIUS = 5;       // How far from spawn they'll roam
+const IDLE_MIN = 2;             // Min seconds standing still
+const IDLE_MAX = 6;
+const WALK_DURATION_MIN = 1.5;
+const WALK_DURATION_MAX = 4;
+const CONVERSE_DURATION_MIN = 3;
+const CONVERSE_DURATION_MAX = 8;
+const CONVERSE_DISTANCE = 3;    // How close NPCs get to chat
 
 export class CharacterManager {
-  constructor(scene) {
+  constructor(scene, spawnPoints) {
     this.scene = scene;
-    this.characters = [];
-    this.allCharacters = [];
-    this.roomCharData = {};
-    this.kiosks = [];
+    this.characters = []; // { data, group, nameSprite, idleOffset, baseY, spawnPointIdx }
+    this.spawnPoints = spawnPoints.map(p => p.clone());
+    this.usedSpawnPoints = new Set();
+    this.photoMap = {};
+    this.photoCache = {};
+    this.animations = []; // { charId, type:'spawn'|'despawn', progress, group, onComplete }
     this.playerPosition = new THREE.Vector3();
+    this.lenny = null; // Reference to Lenny's character entry
   }
 
-  createAllCharacters(charactersData, roomMeta) {
-    const byRoom = {};
-    for (const char of charactersData) {
-      if (!byRoom[char.roomId]) byRoom[char.roomId] = [];
-      byRoom[char.roomId].push(char);
-    }
-    this.allCharacters = charactersData;
+  setPhotoMap(map) {
+    this.photoMap = map || {};
+  }
 
-    for (const [roomId, chars] of Object.entries(byRoom)) {
-      const room = roomMeta[roomId];
-      if (!room) continue;
-      this.roomCharData[roomId] = chars;
+  // ── Spawn Lenny at the podcast desk ────────────────────────────────────────
+  spawnLenny(position, data) {
+    const char = this.createCharacter(data, position);
+    this.lenny = char;
+    // No spawn point used for Lenny — he's at the desk
+    return char;
+  }
 
-      const featured = [];
-      const rest = [];
-      for (const c of chars) {
-        if (c.isHost) featured.unshift(c);
-        else if (featured.length < MAX_VISIBLE_PER_ROOM) featured.push(c);
-        else rest.push(c);
+  // ── Spawn guests recommended by Lenny ──────────────────────────────────────
+  spawnGuests(charDataArray) {
+    const spawned = [];
+    for (const charData of charDataArray) {
+      // Skip if already spawned
+      if (this.characters.find(c => c.data.id === charData.id)) continue;
+
+      // Despawn oldest non-Lenny if at capacity
+      const nonLennyCount = this.characters.filter(c => !c.data.isHost).length;
+      if (nonLennyCount >= MAX_SPAWNED) {
+        const oldest = this.characters.find(c => !c.data.isHost);
+        if (oldest) this.despawnCharacter(oldest.data.id);
       }
 
-      const positions = this.computePositions(featured.length, room);
-      for (let i = 0; i < featured.length; i++) {
-        this.createCharacter(featured[i], positions[i]);
+      // Pick an available spawn point
+      const spawnIdx = this.getAvailableSpawnPoint();
+      if (spawnIdx === -1) continue; // No spawn points left
+
+      const position = this.spawnPoints[spawnIdx];
+      const char = this.createCharacter(charData, position);
+      char.spawnPointIdx = spawnIdx;
+      this.usedSpawnPoints.add(spawnIdx);
+
+      // Start spawn animation (scale from 0 to 1)
+      char.group.scale.set(0.01, 0.01, 0.01);
+      this.animations.push({
+        charId: charData.id,
+        type: 'spawn',
+        progress: 0,
+        group: char.group,
+      });
+
+      spawned.push(char);
+    }
+    return spawned;
+  }
+
+  // ── Despawn a character with animation ─────────────────────────────────────
+  despawnCharacter(charId) {
+    const idx = this.characters.findIndex(c => c.data.id === charId);
+    if (idx === -1) return;
+    const char = this.characters[idx];
+
+    this.animations.push({
+      charId,
+      type: 'despawn',
+      progress: 0,
+      group: char.group,
+      onComplete: () => {
+        // Remove from scene and dispose
+        this.scene.remove(char.group);
+        char.group.traverse(obj => {
+          if (obj.geometry) obj.geometry.dispose();
+          if (obj.material) {
+            if (Array.isArray(obj.material)) obj.material.forEach(m => m.dispose());
+            else obj.material.dispose();
+          }
+        });
+        // Free spawn point
+        if (char.spawnPointIdx !== undefined) {
+          this.usedSpawnPoints.delete(char.spawnPointIdx);
+        }
+        // Remove from array
+        const i = this.characters.findIndex(c => c.data.id === charId);
+        if (i !== -1) this.characters.splice(i, 1);
       }
-
-      if (rest.length > 0 && room.name !== 'Lobby') {
-        this.createKiosk(room, rest, featured);
-      }
-    }
+    });
   }
 
-  computePositions(count, room) {
-    const positions = [];
-    if (room.name === 'Lobby') {
-      positions.push(new THREE.Vector3(0, 0, -2));
-      return positions;
+  getAvailableSpawnPoint() {
+    for (let i = 0; i < this.spawnPoints.length; i++) {
+      if (!this.usedSpawnPoints.has(i)) return i;
     }
-    const angleSpread = Math.PI * 0.8;
-    const startAngle = room.angle + Math.PI - angleSpread / 2;
-    const radius = Math.min(room.size * 0.3, 6);
-    for (let i = 0; i < count; i++) {
-      const t = count > 1 ? i / (count - 1) : 0.5;
-      const a = startAngle + t * angleSpread;
-      const r = radius * (0.5 + Math.random() * 0.5);
-      positions.push(new THREE.Vector3(
-        room.center.x + Math.cos(a) * r,
-        0,
-        room.center.z - Math.sin(a) * r
-      ));
-    }
-    return positions;
+    return -1;
   }
 
-  createKiosk(room, hiddenChars, visibleChars) {
-    const group = new THREE.Group();
-    const entranceDir = room.angle;
-    const kx = room.center.x - Math.cos(entranceDir) * (room.size * 0.35);
-    const kz = room.center.z + Math.sin(entranceDir) * (room.size * 0.35);
-
-    const baseMat = new THREE.MeshStandardMaterial({
-      color: new THREE.Color(room.color).multiplyScalar(0.4),
-      roughness: 0.3, metalness: 0.6,
-    });
-    const base = new THREE.Mesh(new THREE.CylinderGeometry(0.6, 0.7, 1.2, 8), baseMat);
-    base.position.y = 0.6;
-    base.castShadow = true;
-    group.add(base);
-
-    const screenMat = new THREE.MeshStandardMaterial({
-      color: 0x111122, emissive: new THREE.Color(room.color),
-      emissiveIntensity: 0.3, roughness: 0.1,
-    });
-    const screen = new THREE.Mesh(new THREE.BoxGeometry(0.8, 0.6, 0.05), screenMat);
-    screen.position.y = 1.5;
-    screen.rotation.y = -entranceDir + Math.PI / 2;
-    group.add(screen);
-
-    const ringMat = new THREE.MeshStandardMaterial({
-      color: new THREE.Color(room.color), emissive: new THREE.Color(room.color),
-      emissiveIntensity: 0.8, transparent: true, opacity: 0.6,
-    });
-    const ring = new THREE.Mesh(new THREE.TorusGeometry(0.4, 0.03, 8, 32), ringMat);
-    ring.position.y = 2.2;
-    ring.rotation.x = Math.PI / 2;
-    group.add(ring);
-
-    const countSprite = makeTextSprite(`+${hiddenChars.length} more guests`, room.color, 0.35);
-    countSprite.position.y = 2.8;
-    group.add(countSprite);
-
-    group.position.set(kx, 0, kz);
-    this.scene.add(group);
-
-    this.kiosks.push({ group, ring, position: new THREE.Vector3(kx, 0, kz), roomId: room.name, hiddenChars, visibleChars });
-  }
-
+  // ── Create a character mesh ────────────────────────────────────────────────
   createCharacter(charData, position) {
     const group = new THREE.Group();
     group.position.copy(position);
@@ -167,21 +173,26 @@ export class CharacterManager {
       hair.position.y = 2.0; group.add(hair);
     }
 
-    // Legs + shoes
+    // Legs + shoes (store refs for walk animation)
+    const legs = {};
     const sw = 0.13 + (h % 3) * 0.02;
     for (const side of [-sw, sw]) {
       const leg = new THREE.Mesh(new THREE.CapsuleGeometry(0.09, 0.4, 4, 8), new THREE.MeshStandardMaterial({ color: pantsColor, roughness: 0.8 }));
       leg.position.set(side, 0.38, 0); leg.castShadow = true; group.add(leg);
       const shoe = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.08, 0.2), new THREE.MeshStandardMaterial({ color: 0x222222, roughness: 0.5 }));
       shoe.position.set(side, 0.06, 0.04); group.add(shoe);
+      if (side < 0) legs.left = leg; else legs.right = leg;
     }
 
-    // Arms
+    // Arms (store refs for walk animation)
+    const arms = {};
     for (const side of [-1, 1]) {
       const arm = new THREE.Mesh(new THREE.CapsuleGeometry(0.06, 0.35, 4, 6), new THREE.MeshStandardMaterial({ color: skinColor, roughness: 0.6 }));
       arm.position.set(side * 0.4, 1.05, 0);
       arm.rotation.z = side * (-0.1 - (h % 5) * 0.03);
       group.add(arm);
+      if (side < 0) arms.left = arm; else arms.right = arm;
+      arm.userData.restZ = arm.rotation.z;
     }
 
     // Accessories
@@ -190,7 +201,7 @@ export class CharacterManager {
       if (accMesh) group.add(accMesh);
     }
 
-    // Host glow
+    // Host glow for Lenny
     if (charData.isHost) {
       const glow = new THREE.Mesh(
         new THREE.RingGeometry(0.8, 1.0, 32),
@@ -205,23 +216,75 @@ export class CharacterManager {
     const shadow = new THREE.Mesh(new THREE.CircleGeometry(0.35, 16), new THREE.MeshStandardMaterial({ color: 0x000000, transparent: true, opacity: 0.3 }));
     shadow.rotation.x = -Math.PI / 2; shadow.position.y = 0.02; group.add(shadow);
 
-    // Name
+    // Name sprite
     const nameSprite = makeTextSprite(charData.name, '#ffffff', 0.35);
     nameSprite.position.y = 2.7; nameSprite.visible = false; group.add(nameSprite);
 
-    // Title
+    // Title sprite
     if (charData.title) {
       const titleSprite = makeTextSprite(charData.title, '#aaaacc', 0.2);
       titleSprite.position.y = 2.4; titleSprite.visible = false; group.add(titleSprite);
       charData._titleSprite = titleSprite;
     }
 
-    // Face toward lobby
-    const toLobby = Math.atan2(-position.x, -position.z);
-    group.rotation.y = toLobby + (Math.random() - 0.5) * 0.5;
+    // Photo portrait billboard
+    const photoUrl = this.photoMap[charData.id];
+    let billboard = null;
+    if (photoUrl) {
+      billboard = this.createPhotoBillboard(charData.id, photoUrl);
+      if (billboard) {
+        billboard.position.y = 3.2;
+        group.add(billboard);
+      }
+    }
+
+    // Face toward lounge center
+    const toCenter = Math.atan2(-position.x, -position.z);
+    group.rotation.y = toCenter + (Math.random() - 0.5) * 0.5;
 
     this.scene.add(group);
-    this.characters.push({ data: charData, group, nameSprite, idleOffset: Math.random() * Math.PI * 2, baseY: position.y });
+    const charEntry = {
+      data: charData, group, nameSprite, billboard, legs, arms,
+      idleOffset: Math.random() * Math.PI * 2,
+      baseY: position.y,
+      spawnPos: position.clone(),
+      // Behavior state
+      state: charData.isHost ? 'idle' : 'idle', // 'idle' | 'walking' | 'conversing' | 'talking_to_player'
+      stateTimer: Math.random() * IDLE_MAX,       // Countdown until next state change
+      walkTarget: null,                            // Where we're walking to
+      conversePartner: null,                       // Who we're chatting with
+    };
+    this.characters.push(charEntry);
+    return charEntry;
+  }
+
+  // ── Photo billboard ────────────────────────────────────────────────────────
+  createPhotoBillboard(id, url) {
+    if (this.photoCache[id]) return this.photoCache[id].clone();
+
+    const group = new THREE.Group();
+
+    // Colored ring border
+    const ringGeo = new THREE.RingGeometry(0.48, 0.55, 32);
+    const ringMat = new THREE.MeshBasicMaterial({ color: 0x4A90D9, side: THREE.DoubleSide });
+    const ring = new THREE.Mesh(ringGeo, ringMat);
+    group.add(ring);
+
+    // Photo circle
+    const loader = new THREE.TextureLoader();
+    loader.load(url, (texture) => {
+      const circleGeo = new THREE.CircleGeometry(0.47, 32);
+      const circleMat = new THREE.MeshBasicMaterial({ map: texture, side: THREE.DoubleSide });
+      const circle = new THREE.Mesh(circleGeo, circleMat);
+      circle.position.z = 0.01;
+      group.add(circle);
+    }, undefined, () => {
+      // Photo load failed — just keep the ring as decoration, name label is still visible
+    });
+
+    group.userData.isBillboard = true;
+    this.photoCache[id] = group;
+    return group;
   }
 
   hashString(str) {
@@ -230,54 +293,297 @@ export class CharacterManager {
     return Math.abs(hash);
   }
 
-  update(playerPosition, time) {
-    this.playerPosition.copy(playerPosition);
-    for (const char of this.characters) {
-      char.group.position.y = char.baseY + Math.sin(time * 1.5 + char.idleOffset) * 0.02;
-      const dist = this.playerPosition.distanceTo(char.group.position);
-      char.nameSprite.visible = dist < NAME_VISIBLE_DISTANCE;
-      if (char.data._titleSprite) char.data._titleSprite.visible = dist < NAME_VISIBLE_DISTANCE * 0.6;
-      if (dist < INTERACTION_DISTANCE * 1.5) {
-        const dx = this.playerPosition.x - char.group.position.x;
-        const dz = this.playerPosition.z - char.group.position.z;
-        const targetAngle = Math.atan2(dx, dz);
-        let diff = targetAngle - char.group.rotation.y;
-        while (diff > Math.PI) diff -= Math.PI * 2;
-        while (diff < -Math.PI) diff += Math.PI * 2;
-        char.group.rotation.y += diff * 0.05;
+  // ── Player interaction ──────────────────────────────────────────────────
+  setTalkingToPlayer(charId) {
+    const char = this.characters.find(c => c.data.id === charId);
+    if (char) {
+      char.state = 'talking_to_player';
+      char.walkTarget = null;
+      // Release any converse partner
+      if (char.conversePartner) {
+        const partner = this.characters.find(c => c.data.id === char.conversePartner);
+        if (partner && partner.state === 'conversing') {
+          partner.state = 'idle';
+          partner.stateTimer = randRange(IDLE_MIN, IDLE_MAX);
+          partner.conversePartner = null;
+        }
+        char.conversePartner = null;
       }
-    }
-    for (const kiosk of this.kiosks) {
-      kiosk.ring.rotation.z = time * 0.5;
-      kiosk.ring.position.y = 2.2 + Math.sin(time * 2) * 0.1;
     }
   }
 
+  releaseTalkingToPlayer(charId) {
+    const char = this.characters.find(c => c.data.id === charId);
+    if (char && char.state === 'talking_to_player') {
+      char.state = 'idle';
+      char.stateTimer = randRange(IDLE_MIN, IDLE_MAX);
+    }
+  }
+
+  // ── Update loop ────────────────────────────────────────────────────────────
+  update(playerPosition, time, camera, delta) {
+    this.playerPosition.copy(playerPosition);
+    const dt = delta || (1 / 60);
+
+    for (const char of this.characters) {
+      // Idle bob (subtle)
+      const isMoving = char.state === 'walking';
+      if (!isMoving) {
+        char.group.position.y = char.baseY + Math.sin(time * 1.5 + char.idleOffset) * 0.02;
+      }
+
+      // Visibility
+      const dist = this.playerPosition.distanceTo(char.group.position);
+      char.nameSprite.visible = dist < NAME_VISIBLE_DISTANCE;
+      if (char.data._titleSprite) char.data._titleSprite.visible = dist < NAME_VISIBLE_DISTANCE * 0.6;
+
+      // Billboard faces camera
+      if (char.billboard && camera) {
+        char.billboard.lookAt(camera.position);
+      }
+
+      // Skip behavior for Lenny (he stays at the desk)
+      if (char.data.isHost) {
+        // Lenny still faces player when close
+        if (dist < INTERACTION_DISTANCE * 1.5) {
+          this.smoothFaceTarget(char, this.playerPosition);
+        }
+        continue;
+      }
+
+      // ── State machine ──────────────────────────────────────────────
+      switch (char.state) {
+        case 'talking_to_player':
+          // Face the player, stand still, reset limbs
+          this.smoothFaceTarget(char, this.playerPosition);
+          this.resetLimbs(char);
+          break;
+
+        case 'idle':
+          this.resetLimbs(char);
+          // Face player if very close
+          if (dist < INTERACTION_DISTANCE * 1.5) {
+            this.smoothFaceTarget(char, this.playerPosition);
+          }
+          char.stateTimer -= dt;
+          if (char.stateTimer <= 0) {
+            this.pickNextBehavior(char);
+          }
+          break;
+
+        case 'walking':
+          if (char.walkTarget) {
+            // Move toward target
+            const dx = char.walkTarget.x - char.group.position.x;
+            const dz = char.walkTarget.z - char.group.position.z;
+            const distToTarget = Math.sqrt(dx * dx + dz * dz);
+
+            if (distToTarget < 0.3) {
+              // Arrived
+              char.state = 'idle';
+              char.stateTimer = randRange(IDLE_MIN, IDLE_MAX);
+              char.walkTarget = null;
+              this.resetLimbs(char);
+            } else {
+              // Walk
+              const targetAngle = Math.atan2(dx, dz);
+              this.smoothFaceAngle(char, targetAngle);
+              const speed = NPC_WALK_SPEED * dt;
+              char.group.position.x += (dx / distToTarget) * speed;
+              char.group.position.z += (dz / distToTarget) * speed;
+              // Walk animation
+              this.animateWalk(char, time);
+            }
+          }
+          char.stateTimer -= dt;
+          if (char.stateTimer <= 0) {
+            // Timed out walking — stop
+            char.state = 'idle';
+            char.stateTimer = randRange(IDLE_MIN, IDLE_MAX);
+            char.walkTarget = null;
+            this.resetLimbs(char);
+          }
+          break;
+
+        case 'conversing':
+          this.resetLimbs(char);
+          // Face the partner
+          const partner = this.characters.find(c => c.data.id === char.conversePartner);
+          if (partner) {
+            this.smoothFaceTarget(char, partner.group.position);
+          }
+          char.stateTimer -= dt;
+          if (char.stateTimer <= 0) {
+            char.state = 'idle';
+            char.stateTimer = randRange(IDLE_MIN, IDLE_MAX);
+            // Also release partner
+            if (partner && partner.state === 'conversing' && partner.conversePartner === char.data.id) {
+              partner.state = 'idle';
+              partner.stateTimer = randRange(IDLE_MIN, IDLE_MAX);
+              partner.conversePartner = null;
+            }
+            char.conversePartner = null;
+          }
+          break;
+      }
+    }
+
+    // Process spawn/despawn animations
+    this.processAnimations(time);
+  }
+
+  // ── Behavior selection ─────────────────────────────────────────────────────
+  pickNextBehavior(char) {
+    const roll = Math.random();
+
+    // 40% chance: walk to a random nearby point
+    if (roll < 0.4) {
+      const angle = Math.random() * Math.PI * 2;
+      const dist = Math.random() * WANDER_RADIUS;
+      const target = new THREE.Vector3(
+        char.spawnPos.x + Math.cos(angle) * dist,
+        char.baseY,
+        char.spawnPos.z + Math.sin(angle) * dist
+      );
+      // Clamp to lounge bounds (keep 2 units from walls)
+      target.x = Math.max(-18, Math.min(18, target.x));
+      target.z = Math.max(-13, Math.min(13, target.z));
+      char.walkTarget = target;
+      char.state = 'walking';
+      char.stateTimer = randRange(WALK_DURATION_MIN, WALK_DURATION_MAX);
+      return;
+    }
+
+    // 30% chance: try to converse with a nearby NPC
+    if (roll < 0.7) {
+      const nearby = this.characters.filter(c =>
+        c !== char &&
+        !c.data.isHost &&
+        c.state === 'idle' &&
+        c.group.position.distanceTo(char.group.position) < CONVERSE_DISTANCE * 2
+      );
+      if (nearby.length > 0) {
+        const partner = nearby[Math.floor(Math.random() * nearby.length)];
+        const duration = randRange(CONVERSE_DURATION_MIN, CONVERSE_DURATION_MAX);
+        char.state = 'conversing';
+        char.stateTimer = duration;
+        char.conversePartner = partner.data.id;
+        partner.state = 'conversing';
+        partner.stateTimer = duration;
+        partner.conversePartner = char.data.id;
+        return;
+      }
+    }
+
+    // Otherwise: just idle again
+    char.state = 'idle';
+    char.stateTimer = randRange(IDLE_MIN, IDLE_MAX);
+  }
+
+  // ── Animation helpers ──────────────────────────────────────────────────────
+  animateWalk(char, time) {
+    const cycle = Math.sin(time * 8 + char.idleOffset) * 0.3;
+    if (char.legs.left) char.legs.left.rotation.x = cycle;
+    if (char.legs.right) char.legs.right.rotation.x = -cycle;
+    if (char.arms.left) char.arms.left.rotation.x = -cycle * 0.5;
+    if (char.arms.right) char.arms.right.rotation.x = cycle * 0.5;
+    // Subtle bounce
+    char.group.position.y = char.baseY + Math.abs(Math.sin(time * 8 + char.idleOffset)) * 0.03;
+  }
+
+  resetLimbs(char) {
+    if (char.legs.left) char.legs.left.rotation.x = 0;
+    if (char.legs.right) char.legs.right.rotation.x = 0;
+    if (char.arms.left) char.arms.left.rotation.x = 0;
+    if (char.arms.right) char.arms.right.rotation.x = 0;
+  }
+
+  smoothFaceTarget(char, targetPos) {
+    const dx = targetPos.x - char.group.position.x;
+    const dz = targetPos.z - char.group.position.z;
+    const targetAngle = Math.atan2(dx, dz);
+    this.smoothFaceAngle(char, targetAngle);
+  }
+
+  smoothFaceAngle(char, targetAngle) {
+    let diff = targetAngle - char.group.rotation.y;
+    while (diff > Math.PI) diff -= Math.PI * 2;
+    while (diff < -Math.PI) diff += Math.PI * 2;
+    char.group.rotation.y += diff * 0.08;
+  }
+
+  processAnimations() {
+    const dt = 1 / 60; // Approximate frame time
+    const toRemove = [];
+
+    for (let i = 0; i < this.animations.length; i++) {
+      const anim = this.animations[i];
+
+      if (anim.type === 'spawn') {
+        anim.progress += dt / 0.5; // 0.5s duration
+        if (anim.progress >= 1) {
+          anim.group.scale.set(1, 1, 1);
+          toRemove.push(i);
+        } else {
+          const t = easeOutBack(anim.progress);
+          anim.group.scale.set(t, t, t);
+        }
+      } else if (anim.type === 'despawn') {
+        anim.progress += dt / 0.3; // 0.3s duration
+        if (anim.progress >= 1) {
+          anim.group.scale.set(0, 0, 0);
+          if (anim.onComplete) anim.onComplete();
+          toRemove.push(i);
+        } else {
+          const t = 1 - anim.progress;
+          anim.group.scale.set(t, t, t);
+        }
+      }
+    }
+
+    // Remove completed animations (reverse order to preserve indices)
+    for (let i = toRemove.length - 1; i >= 0; i--) {
+      this.animations.splice(toRemove[i], 1);
+    }
+  }
+
+  // ── Get nearest interactable character ─────────────────────────────────────
   getNearestInteractable(playerPosition) {
     let nearest = null;
     let nearestDist = INTERACTION_DISTANCE;
     for (const char of this.characters) {
       const dist = playerPosition.distanceTo(char.group.position);
-      if (dist < nearestDist) { nearestDist = dist; nearest = { type: 'character', data: char.data }; }
-    }
-    for (const kiosk of this.kiosks) {
-      const dist = playerPosition.distanceTo(kiosk.position);
-      if (dist < INTERACTION_DISTANCE + 1 && (!nearest || dist < nearestDist)) {
-        nearestDist = dist; nearest = { type: 'kiosk', data: kiosk };
+      if (dist < nearestDist) {
+        nearestDist = dist;
+        nearest = char.data;
       }
     }
-    if (!nearest) return null;
-    if (nearest.type === 'character') return nearest.data;
-    return { name: 'Guest Directory: ' + nearest.data.roomId, isKiosk: true, kiosk: nearest.data };
+    return nearest;
   }
 
-  spawnFromDirectory(charData, kioskPosition) {
-    const offset = new THREE.Vector3((Math.random() - 0.5) * 3, 0, (Math.random() - 0.5) * 3);
-    this.createCharacter(charData, kioskPosition.clone().add(offset));
-    return charData.name;
+  // ── Get positions for minimap ──────────────────────────────────────────────
+  getGuestPositions() {
+    return this.characters.map(c => ({
+      x: c.group.position.x,
+      z: c.group.position.z,
+      isHost: !!c.data.isHost
+    }));
   }
 }
 
+// ── Utility ───────────────────────────────────────────────────────────────────
+function randRange(min, max) {
+  return min + Math.random() * (max - min);
+}
+
+// ── Easing functions ──────────────────────────────────────────────────────────
+function easeOutBack(t) {
+  const c1 = 1.70158;
+  const c3 = c1 + 1;
+  return 1 + c3 * Math.pow(t - 1, 3) + c1 * Math.pow(t - 1, 2);
+}
+
+// ── Accessory creation ────────────────────────────────────────────────────────
 function createAccessory(acc) {
   const group = new THREE.Group();
   const mat = new THREE.MeshStandardMaterial({ color: acc.color, emissive: acc.color, emissiveIntensity: 0.3, roughness: 0.5 });

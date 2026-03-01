@@ -2,9 +2,13 @@ import * as THREE from 'three';
 
 const MOVE_SPEED = 10;
 const ROTATE_SPEED = 2.5;
-const CAMERA_HEIGHT = 8;
-const CAMERA_DISTANCE = 12;
-const CAMERA_LOOK_AHEAD = 4;
+
+// Zoom levels: [distance, height, lookAhead]
+// From first-person all the way out to far third-person
+const ZOOM_MIN = 0;    // First person
+const ZOOM_MAX = 14;   // Far third person
+const ZOOM_STEP = 1.5;
+const ZOOM_LERP = 0.1; // Smooth interpolation speed
 
 export class Player {
   constructor(scene, camera, shirtColor, wallBoxes = []) {
@@ -18,6 +22,10 @@ export class Player {
     this.wallBoxes = wallBoxes;
     this.playerRadius = 0.5;
 
+    // Zoom state
+    this.zoomTarget = 12;  // Start at default third-person distance
+    this.zoomCurrent = 12;
+
     // Build player mesh
     this.buildModel(shirtColor);
 
@@ -28,8 +36,10 @@ export class Player {
     // Input handlers
     this.onKeyDown = this.onKeyDown.bind(this);
     this.onKeyUp = this.onKeyUp.bind(this);
+    this.onWheel = this.onWheel.bind(this);
     window.addEventListener('keydown', this.onKeyDown);
     window.addEventListener('keyup', this.onKeyUp);
+    window.addEventListener('wheel', this.onWheel, { passive: false });
   }
 
   buildModel(shirtColor) {
@@ -100,6 +110,13 @@ export class Player {
 
   onKeyUp(e) {
     this.keys[e.key] = false;
+  }
+
+  onWheel(e) {
+    if (this.dialogueOpen) return;
+    e.preventDefault();
+    const direction = e.deltaY > 0 ? 1 : -1;
+    this.zoomTarget = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, this.zoomTarget + direction * ZOOM_STEP));
   }
 
   update(delta, time) {
@@ -187,26 +204,39 @@ export class Player {
   }
 
   updateCamera() {
+    // Smoothly interpolate zoom
+    this.zoomCurrent += (this.zoomTarget - this.zoomCurrent) * ZOOM_LERP;
+
+    const dist = this.zoomCurrent;
+    const t = dist / ZOOM_MAX; // 0 = first person, 1 = max zoom out
+
+    // Interpolate camera parameters based on zoom
+    const camHeight = 1.8 + t * 6.2;        // 1.8 (eye level) → 8.0
+    const camDistance = dist;                 // 0 → ZOOM_MAX
+    const lookAhead = t * 4;                 // 0 → 4
+
     const behind = new THREE.Vector3(
-      -Math.sin(this.rotation) * CAMERA_DISTANCE,
-      CAMERA_HEIGHT,
-      -Math.cos(this.rotation) * CAMERA_DISTANCE
+      -Math.sin(this.rotation) * camDistance,
+      camHeight,
+      -Math.cos(this.rotation) * camDistance
     );
 
     const targetCamPos = this.group.position.clone().add(behind);
-
-    // Smooth camera follow
     this.camera.position.lerp(targetCamPos, 0.08);
 
-    // Look at player + slightly ahead
+    // Look target: at first person, look far ahead; at third person, look at player
+    const lookAtY = 1.8 - t * 0.3; // Eye-level in first person, slightly lower in third
     const lookAt = this.group.position.clone().add(
       new THREE.Vector3(
-        Math.sin(this.rotation) * CAMERA_LOOK_AHEAD,
-        1.5,
-        Math.cos(this.rotation) * CAMERA_LOOK_AHEAD
+        Math.sin(this.rotation) * (lookAhead + (1 - t) * 8),
+        lookAtY,
+        Math.cos(this.rotation) * (lookAhead + (1 - t) * 8)
       )
     );
     this.camera.lookAt(lookAt);
+
+    // Hide player model when in first person (distance < 2)
+    this.group.visible = dist > 2;
   }
 
   get position() {

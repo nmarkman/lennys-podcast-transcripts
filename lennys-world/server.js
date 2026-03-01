@@ -8,7 +8,22 @@ const app = express();
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
-// Serve character data
+// Load guest catalog for Lenny's recommendation engine
+let guestCatalog = [];
+const catalogPath = path.join(__dirname, 'data', 'guest-catalog.json');
+if (fs.existsSync(catalogPath)) {
+  guestCatalog = JSON.parse(fs.readFileSync(catalogPath, 'utf-8'));
+}
+
+// Load full character data for batch endpoint
+let allCharacters = [];
+const charsPath = path.join(__dirname, 'data', 'characters.json');
+if (fs.existsSync(charsPath)) {
+  const data = JSON.parse(fs.readFileSync(charsPath, 'utf-8'));
+  allCharacters = data.characters || [];
+}
+
+// Serve character data (kept for backwards compat, but clients no longer load all at startup)
 app.get('/api/characters', (req, res) => {
   const dataPath = path.join(__dirname, 'data', 'characters.json');
   if (!fs.existsSync(dataPath)) {
@@ -17,7 +32,106 @@ app.get('/api/characters', (req, res) => {
   res.sendFile(dataPath);
 });
 
-// Chat endpoint — proxies to Anthropic API with transcript context
+// Lenny host endpoint — recommendation engine
+app.post('/api/chat/lenny', async (req, res) => {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) {
+    return res.status(500).json({ error: 'ANTHROPIC_API_KEY not configured in .env' });
+  }
+
+  const { messages, spawnedGuestIds } = req.body;
+  if (!messages) {
+    return res.status(400).json({ error: 'Missing messages' });
+  }
+
+  const spawnedSet = new Set(spawnedGuestIds || []);
+  const availableGuests = guestCatalog.filter(g => !spawnedSet.has(g.id));
+
+  // Build catalog string for system prompt (compact format)
+  const catalogStr = availableGuests.map(g =>
+    `${g.id}: ${g.name} — ${g.title} [${(g.keywords || []).join(', ')}]`
+  ).join('\n');
+
+  const systemPrompt = `You are Lenny Rachitsky, host of Lenny's Podcast — one of the most popular podcasts in the product and business world. You interview top product leaders, founders, and operators.
+
+You are the host of "Lenny's World," a virtual podcast studio lounge. Visitors walk up to chat with you, and you help connect them with the right podcast guests based on their interests.
+
+YOUR ROLE:
+- Be warm, welcoming, and genuinely enthusiastic about connecting people with great ideas
+- When visitors mention a topic or interest, recommend relevant podcast guests they should talk to
+- You know all your guests well — their stories, expertise, and what makes their episodes special
+- Keep your conversational responses concise (2-3 sentences)
+- When recommending guests, briefly explain why each guest is relevant
+
+AVAILABLE GUESTS (not yet in the lounge):
+${catalogStr}
+
+RESPONSE FORMAT — You MUST respond with valid JSON only, no other text:
+{
+  "message": "your conversational response here",
+  "recommendations": [{"id": "guest-id", "reason": "one-line reason why this guest is relevant"}],
+  "suggestedTopics": ["topic1", "topic2", "topic3"]
+}
+
+RULES:
+- "recommendations" should contain 2-7 guests when the visitor mentions a topic or interest. Use an empty array when just greeting or chatting casually.
+- "suggestedTopics" should be 3 clickable topic suggestions based on the conversation so far (e.g. "growth strategies", "hiring tips", "AI in product"). Always include these.
+- Only recommend guests from the AVAILABLE GUESTS list above
+- Use the guest's exact "id" field in recommendations
+- If the visitor's interest doesn't match any available guests well, say so honestly and suggest adjacent topics`;
+
+  try {
+    const client = new Anthropic({ apiKey });
+    const response = await client.messages.create({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 600,
+      system: systemPrompt,
+      messages: messages.map(m => ({
+        role: m.role,
+        content: m.content
+      }))
+    });
+
+    let rawText = response.content[0].text;
+
+    // Strip markdown code fences if present (e.g. ```json ... ```)
+    const fenceMatch = rawText.match(/```(?:json)?\s*([\s\S]*?)```/);
+    if (fenceMatch) rawText = fenceMatch[1].trim();
+
+    // Parse the structured JSON response
+    let parsed;
+    try {
+      parsed = JSON.parse(rawText);
+    } catch {
+      // If Claude didn't return valid JSON, wrap the text
+      parsed = { message: rawText, recommendations: [], suggestedTopics: [] };
+    }
+
+    res.json({
+      message: parsed.message || rawText,
+      recommendations: parsed.recommendations || [],
+      suggestedTopics: parsed.suggestedTopics || [],
+      guestName: 'Lenny Rachitsky'
+    });
+  } catch (err) {
+    console.error('Anthropic API error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Batch character endpoint — load specific guests on demand
+app.post('/api/characters/batch', (req, res) => {
+  const { ids } = req.body;
+  if (!ids || !Array.isArray(ids)) {
+    return res.status(400).json({ error: 'Missing ids array' });
+  }
+
+  const idSet = new Set(ids);
+  const found = allCharacters.filter(c => idSet.has(c.id));
+  res.json(found);
+});
+
+// Chat endpoint — proxies to Anthropic API with transcript context (regular guests only)
 app.post('/api/chat', async (req, res) => {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
@@ -29,66 +143,29 @@ app.post('/api/chat', async (req, res) => {
     return res.status(400).json({ error: 'Missing guestId or messages' });
   }
 
-  // Special case for Lenny
-  const isLenny = guestId === 'lenny-rachitsky';
-
   // Load transcript for context
-  let transcriptContent = '';
-  let guestName = '';
+  const transcriptPath = path.join(__dirname, '..', 'episodes', guestId, 'transcript.md');
+  if (!fs.existsSync(transcriptPath)) {
+    return res.status(404).json({ error: `Transcript not found for ${guestId}` });
+  }
+  const fullContent = fs.readFileSync(transcriptPath, 'utf-8');
 
-  if (isLenny) {
-    guestName = 'Lenny Rachitsky';
-    // For Lenny, gather snippets from multiple transcripts
-    const episodesDir = path.join(__dirname, '..', 'episodes');
-    const dirs = fs.readdirSync(episodesDir).slice(0, 10);
-    const snippets = [];
-    for (const dir of dirs) {
-      const tPath = path.join(episodesDir, dir, 'transcript.md');
-      if (fs.existsSync(tPath)) {
-        const content = fs.readFileSync(tPath, 'utf-8');
-        // Get just Lenny's speaking parts (first few)
-        const lennyLines = content.split('\n')
-          .filter(l => l.startsWith('Lenny'))
-          .slice(0, 3)
-          .map(l => l.replace(/^Lenny.*?\):\s*/, ''));
-        snippets.push(...lennyLines);
-      }
-    }
-    transcriptContent = snippets.join('\n\n');
-  } else {
-    const transcriptPath = path.join(__dirname, '..', 'episodes', guestId, 'transcript.md');
-    if (!fs.existsSync(transcriptPath)) {
-      return res.status(404).json({ error: `Transcript not found for ${guestId}` });
-    }
-    const fullContent = fs.readFileSync(transcriptPath, 'utf-8');
+  // Parse guest name from frontmatter
+  const nameMatch = fullContent.match(/^guest:\s*(.+)$/m);
+  const guestName = nameMatch ? nameMatch[1].trim() : guestId;
 
-    // Parse guest name from frontmatter
-    const nameMatch = fullContent.match(/^guest:\s*(.+)$/m);
-    guestName = nameMatch ? nameMatch[1].trim() : guestId;
+  // Extract transcript body (skip frontmatter)
+  const bodyStart = fullContent.indexOf('---', 4);
+  let transcriptContent = bodyStart > -1 ? fullContent.substring(bodyStart + 3) : fullContent;
 
-    // Extract transcript body (skip frontmatter)
-    const bodyStart = fullContent.indexOf('---', 4);
-    transcriptContent = bodyStart > -1 ? fullContent.substring(bodyStart + 3) : fullContent;
-
-    // Truncate to ~12000 chars to fit in context window while keeping cost reasonable
-    if (transcriptContent.length > 12000) {
-      // Keep first 8000 chars and last 4000 chars (captures intro and lightning round)
-      transcriptContent = transcriptContent.substring(0, 8000) +
-        '\n\n[...middle portion of conversation...]\n\n' +
-        transcriptContent.substring(transcriptContent.length - 4000);
-    }
+  // Truncate to ~12000 chars to fit in context window while keeping cost reasonable
+  if (transcriptContent.length > 12000) {
+    transcriptContent = transcriptContent.substring(0, 8000) +
+      '\n\n[...middle portion of conversation...]\n\n' +
+      transcriptContent.substring(transcriptContent.length - 4000);
   }
 
-  const systemPrompt = isLenny
-    ? `You are Lenny Rachitsky, host of Lenny's Podcast — one of the most popular podcasts in the product and business world. You interview top product leaders, founders, and operators.
-
-You are standing in the lobby of "Lenny's World," a virtual space where visitors can meet you and all your podcast guests. Be warm, welcoming, and helpful. Guide visitors to different rooms based on their interests. You know your guests well and can recommend who to talk to.
-
-Here are some of your typical speaking patterns from the podcast:
-${transcriptContent}
-
-Stay in character as Lenny. Be conversational, curious, and enthusiastic. Keep responses concise (2-3 sentences unless the visitor asks for more detail).`
-    : `You are ${guestName}, and you appeared as a guest on Lenny's Podcast. You are now a character in "Lenny's World," a virtual space where visitors can walk up and talk to podcast guests.
+  const systemPrompt = `You are ${guestName}, and you appeared as a guest on Lenny's Podcast. You are now a character in "Lenny's World," a virtual space where visitors can walk up and talk to podcast guests.
 
 Here is the transcript of your conversation on the podcast — use this as the foundation for your knowledge, opinions, and speaking style:
 
@@ -123,6 +200,15 @@ IMPORTANT RULES:
     console.error('Anthropic API error:', err.message);
     res.status(500).json({ error: err.message });
   }
+});
+
+// Serve Lenny's character data (for initial spawn)
+app.get('/api/characters/lenny', (req, res) => {
+  const lenny = allCharacters.find(c => c.isHost);
+  if (!lenny) {
+    return res.status(404).json({ error: 'Lenny not found. Run: npm run build-data' });
+  }
+  res.json(lenny);
 });
 
 const PORT = process.env.PORT || 3000;
